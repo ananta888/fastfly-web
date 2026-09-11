@@ -1,0 +1,272 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #0d1117;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  color: #e6edf3;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid #21262d;
+  background: #161b22;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #575f6b;
+  transition: background 0.3s;
+}
+
+.dot.on {
+  background: #3fb950;
+  box-shadow: 0 0 8px #3fb950;
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+}
+
+.status-meta {
+  color: #8b949e;
+}
+
+.badge {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.badge-green {
+  background: #1f6f2e;
+  color: #8ce99a;
+}
+
+.badge-red {
+  background: #3d1d1d;
+  color: #ff9b9b;
+}
+
+.main {
+  display: grid;
+  grid-template-columns: 290px 1fr 320px;
+  gap: 12px;
+  padding: 12px;
+  min-height: 0;
+}
+
+.panel {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 10px;
+  padding: 14px;
+  overflow: auto;
+}
+
+.panel h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #8b949e;
+  border-bottom: 1px solid #21262d;
+  padding-bottom: 8px;
+}
+
+.panel-left h2:not(:first-child),
+.panel-right h2:not(:first-child) {
+  margin-top: 18px;
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.btn {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  background: #21262d;
+  color: #e6edf3;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  background: #30363d;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: #1f6feb;
+  border-color: #1f6feb;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #388bfd;
+}
+
+.field {
+  margin-bottom: 12px;
+}
+
+.field label {
+  display: block;
+  font-size: 12px;
+  color: #8b949e;
+  margin-bottom: 6px;
+}
+
+.field input[type='range'] {
+  width: 100%;
+}
+
+.field select {
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid #30363d;
+  background: #21262d;
+  color: #e6edf3;
+  font-size: 13px;
+}
+
+.hint {
+  font-size: 12px;
+  color: #8b949e;
+  margin: 10px 0 0;
+  line-height: 1.5;
+}
+
+.brain-wrap {
+  position: relative;
+  padding: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.brain-wrap app-brain-view {
+  flex: 1;
+}
+
+.brain-overlay {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: #8b949e;
+  background: rgba(13, 17, 23, 0.7);
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid #21262d;
+  white-space: nowrap;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.metric-card {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  padding: 10px;
+  text-align: center;
+}
+
+.metric-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #58a6ff;
+}
+
+.metric-label {
+  font-size: 11px;
+  color: #8b949e;
+  margin-top: 4px;
+}
+
+.group-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.group-bar {
+  display: grid;
+  grid-template-columns: 90px 1fr 52px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.group-name {
+  color: #8b949e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-track {
+  background: #0d1117;
+  border-radius: 6px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.group-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #1f6feb, #8ce99a);
+  border-radius: 6px;
+  transition: width 0.3s ease;
+}
+
+.group-val {
+  text-align: right;
+  color: #8b949e;
+}

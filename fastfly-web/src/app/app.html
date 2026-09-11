@@ -1,0 +1,111 @@
+<div class="app">
+  <header class="header">
+    <div class="brand">
+      <span class="dot" [class.on]="connected()"></span>
+      <span class="title">FastFly &mdash; Drosophila connectome</span>
+    </div>
+    <div class="status">
+      <span [class.badge]="true" [class.badge-green]="running()" [class.badge-red]="!running()">
+        {{ running() ? 'SIMULATION LÄUFT' : 'PAUSIERT' }}
+      </span>
+      <span class="status-meta">
+        {{ fmt(nNeurons()) }} Neuronen &middot; {{ fmt(nSynapses()) }} Synapsen &middot; Step {{ fmt(step()) }}
+      </span>
+    </div>
+  </header>
+
+  <main class="main">
+    <aside class="panel panel-left">
+      <h2>Steuerung</h2>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" (click)="start()" [disabled]="running()">Start</button>
+        <button class="btn" (click)="pause()" [disabled]="!running()">Pause</button>
+        <button class="btn" (click)="stepOnce()" [disabled]="running()">Einzel-Schritt</button>
+      </div>
+
+      <div class="view-tabs">
+        <button class="vt" [class.active]="mode() === 'brain'" (click)="setMode('brain')">
+          Gehirn 3D
+        </button>
+        <button class="vt" [class.active]="mode() === 'arena'" (click)="setMode('arena')">
+          Arena
+        </button>
+      </div>
+
+      <div class="field">
+        <label for="noise">Rauschen: {{ noise().toFixed(2) }}</label>
+        <input id="noise" type="range" min="0" max="1" step="0.05"
+               [value]="noise()" (input)="noiseEvent($event)" />
+      </div>
+
+      <h2>Stimulus</h2>
+      <div class="field">
+        <label for="stim">Sensorischer Reiz</label>
+        <select id="stim" [value]="selectedStimulus()"
+                (change)="stimulusChange($event)">
+          <option *ngFor="let s of stimuli()" [value]="s">{{ s }}</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="amp">Amplitude: {{ amplitude().toFixed(2) }}</label>
+        <input id="amp" type="range" min="0" max="2" step="0.1"
+               [value]="amplitude()" (input)="ampEvent($event)" />
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" (click)="applyStimulus()">Reiz setzen</button>
+        <button class="btn" (click)="clearStimulus()">Zurücksetzen</button>
+      </div>
+
+      <p class="hint">
+        <ng-container *ngIf="stimuli().length === 0">
+          Als Reiz dienen echte sensorische Zellgruppen
+          der Annotationen (Zucker, Geruch, Licht, Berührung&hellip;).
+        </ng-container>
+      </p>
+    </aside>
+
+    <section class="brain-wrap panel">
+      <app-brain-view #brain></app-brain-view>
+      <div class="brain-overlay">Gelbe Punkte = aktive Neuronen dieser Runde</div>
+    </section>
+
+    <aside class="panel panel-right">
+      <h2>Metriken</h2>
+      <div class="metric-grid">
+        <div class="metric-card">
+          <div class="metric-value">{{ fmt(stepsPerSec()) }}</div>
+          <div class="metric-label">Steps / Sek</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">{{ speedup().toFixed(2) }}&times;</div>
+          <div class="metric-label">Gegen Echtzeit</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">{{ fmt(spikesPerStep()) }}</div>
+          <div class="metric-label">Spikes / Step</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">{{ fmt(firingPct(), 2) }}%</div>
+          <div class="metric-label">Firing-Rate</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">{{ meanVoltage().toFixed(3) }}</div>
+          <div class="metric-label">Mittel V</div>
+        </div>
+      </div>
+
+      <h2>Aktivität je Zellgruppe</h2>
+      <div class="group-bars">
+        <div class="group-bar" *ngFor="let label of groupLabels(); let i = index">
+          <span class="group-name">{{ label }}</span>
+          <div class="group-track">
+            <div class="group-fill" [style.width.%]="barWidth(groupRates()[i] ?? 0)"></div>
+          </div>
+          <span class="group-val">{{ ((groupRates()[i] ?? 0) * 100).toFixed(2) }}%</span>
+        </div>
+        <p class="hint" *ngIf="groupLabels().length === 0">Warte auf Daten&hellip;</p>
+      </div>
+    </aside>
+  </main>
+</div>

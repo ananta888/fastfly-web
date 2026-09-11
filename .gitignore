@@ -1,0 +1,36 @@
+# ==== Python ====
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# ==== Node / Angular ====
+node_modules/
+dist/
+.angular/
+*.log
+
+# ==== Laufzeit-API-Go/-Daten (groß, nicht versionieren) ====
+*.bin
+*.npz
+*.parquet
+*.tsv
+*.csv
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+
+FastFly/build/
+FastFly/cmake-build-*/
+
+# Systemd/Caddy Laufzeitdateien
+caddy/*.log
+caddy/config/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

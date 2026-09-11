@@ -1,0 +1,27 @@
+minipc.ananta.de {
+	encode gzip zstd
+
+	redir /fastfly /fastfly/ permanent
+
+	@api path /fastfly/api/*
+	handle @api {
+		uri strip_prefix /fastfly
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle /fastfly/ws {
+		uri strip_prefix /fastfly
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle /fastfly/* {
+		uri strip_prefix /fastfly
+		root * /srv/fastfly
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle {
+		respond "FastFly ist unter https://minipc.ananta.de/fastfly/ erreichbar" 200
+	}
+}
