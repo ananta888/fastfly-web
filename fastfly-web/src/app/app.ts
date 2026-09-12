@@ -48,6 +48,10 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
   protected readonly stimuliFull = signal<string[]>([]);
   protected readonly amplitudeS = signal(0.5);
 
+  // Plasticity (STDP) — off by default; see FastFly/sim_engine.py.
+  protected readonly plasticityEnabled = signal(false);
+  protected readonly weightDrift = signal(0);
+
   @ViewChild('brain') private set brainRef(view: BrainView | undefined) {
     this.brain = view;
     if (view && this.positions && this.classes) view.setBrain(this.positions, this.classes);
@@ -83,6 +87,10 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
       case 'state':
         this.running.set(Boolean(m['running']));
         this.connected.set(true);
+        if (typeof m['plasticity_enabled'] === 'boolean') {
+          this.plasticityEnabled.set(m['plasticity_enabled']);
+        }
+        if (m['weight_drift'] === 0) this.weightDrift.set(0); // reset_learning ack
         break;
       case 'init': {
         const nNeurons = m['n_neurons'];
@@ -122,6 +130,16 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
           const rates = (grp as number[]).map((r) => r * 100);
           this.groupRates.set(rates);
         }
+        const active = mtr['active_indices'];
+        if (Array.isArray(active) && this.brain) {
+          this.brain.setActive(active as number[]);
+        }
+        if (typeof mtr['plasticity_enabled'] === 'boolean') {
+          this.plasticityEnabled.set(mtr['plasticity_enabled'] as boolean);
+        }
+        if (typeof mtr['weight_drift'] === 'number') {
+          this.weightDrift.set(mtr['weight_drift'] as number);
+        }
         break;
       }
     }
@@ -157,7 +175,18 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
   noiseEvent(e: Event): void {
     const v = Number((e.target as HTMLInputElement).value);
     this.noise.set(v);
-    this.ws.send({ cmd: 'set_param', param: 'noise_amp', value: v });
+    this.ws.send({ cmd: 'set_param', key: 'noise_amp', value: v });
+  }
+
+  togglePlasticity(): void {
+    const next = !this.plasticityEnabled();
+    // Optimistic — the backend echoes the real state back via 'state'/'metrics'.
+    this.plasticityEnabled.set(next);
+    this.ws.send({ cmd: 'set_param', key: 'plasticity_enabled', value: next });
+  }
+
+  resetLearning(): void {
+    this.ws.send({ cmd: 'reset_learning' });
   }
 
   stimulusChange(e: Event): void {

@@ -328,7 +328,13 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     // its own) — used here instead of a hardcoded constant, so idle walking
     // speed is genuinely brain-derived, not scripted. proboscis/antenna still
     // add an appetitive kick on top when the feeding circuits actually fire.
-    const drive = Math.min(2.4, dc * 3.6 + prob * 700 + ant * 400);
+    // Scaled up ~2.5x from the original tuning: at the old speed a fly this
+    // size only covered ~0.7 body-lengths/sec (real flies do 8-16), which
+    // read as sluggish once the body stopped being an abstract blob and
+    // became a recognizable fly — see the stepFreq comment in loop() for
+    // the matching gait-cadence fix (both need to move together or the legs
+    // visibly slide instead of plant-and-push).
+    const drive = Math.min(6, dc * 9 + prob * 1750 + ant * 1000);
     const steer = THREE.MathUtils.clamp((dr - dl) * 140, -2.6, 2.6);
     if (!this.detected()) this.autoTurn += (Math.random() - 0.5) * 0.28;
     else this.autoTurn *= 0.8;
@@ -410,7 +416,12 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
       // tripod and slows the inner one, exactly how real hexapod steering
       // works (no per-leg motor neurons exist in this brain-only connectome
       // to drive it more directly — see the class comment above).
-      const stepFreq = 3.6 + this.lastSpeed * 3.2 + this.brainHeat * 1.2;
+      // Baseline matches flygym's own CPG intrinsic frequency (~36 rad/s,
+      // ~5.7 Hz — real fly stepping range) instead of an arbitrarily chosen
+      // number; the old value here (~3.6-11) was 3-5x too slow and read as
+      // slow-motion, which stood out a lot more once the body actually
+      // looked like a real fly instead of a glowing blob.
+      const stepFreq = 26 + this.lastSpeed * 5 + this.brainHeat * 4;
       const jitter = (Math.random() - 0.5) * this.brainHeat * 0.4;
       for (const leg of LEG_ORDER) {
         const isLeftLeg = leg[0] === 'l';

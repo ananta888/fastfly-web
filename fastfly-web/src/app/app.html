@@ -63,6 +63,28 @@
           der Annotationen (Zucker, Geruch, Licht, Berührung&hellip;).
         </ng-container>
       </p>
+
+      <h2>Plastizität</h2>
+      <div class="btn-row">
+        <button
+          class="btn"
+          [class.btn-primary]="plasticityEnabled()"
+          (click)="togglePlasticity()"
+        >
+          Lernen: {{ plasticityEnabled() ? 'AN' : 'AUS' }}
+        </button>
+        <button class="btn" (click)="resetLearning()">Zurücksetzen</button>
+      </div>
+      <p class="hint">
+        Echtes STDP an den echten FlyWire-Synapsen (kein Ersatz-Effekt) —
+        standardmäßig aus, weil es die reale Connectome-Verschaltung
+        verändert und die Simulation ca. 4&ndash;5&times; verlangsamt.
+        <ng-container *ngIf="plasticityEnabled()">
+          Abweichung von den Original-Gewichten:
+          <strong>{{ weightDrift().toFixed(2) }}</strong> (Ø |Δ| in
+          Int8-Einheiten, wächst mit der Laufzeit).
+        </ng-container>
+      </p>
     </aside>
 
     <section class="brain-wrap panel" *ngIf="mode() === 'brain'">
