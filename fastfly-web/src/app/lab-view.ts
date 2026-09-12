@@ -11,6 +11,7 @@ import { CommonModule } from '@angular/common';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { WsService } from './ws.service';
+import { applyLegPhase, FlyRig, LEG_ORDER, LegName, loadFlyRig } from './fly-rig';
 
 const STIM_LEFT = 'Sugar (left proboscis)';
 const STIM_RIGHT = 'Sugar (right proboscis)';
@@ -87,22 +88,24 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
   private controls!: OrbitControls;
 
   private bug = new THREE.Group();
-  private bugBody!: THREE.Mesh; // abdomen (glow = firing-rate heat)
-  private head!: THREE.Mesh;
-  private proboscis!: THREE.Mesh;
+  private flyRig?: FlyRig;
+  // Per-leg gait-phase clocks (radians), seeded from the rig's own real
+  // tripod grouping so the two tripod triads start out of phase. Advanced
+  // in loop() and sampled into the real recorded joint-angle table via
+  // applyLegPhase() — see fly-rig.ts.
+  private legPhases: Record<LegName, number> = {
+    lf: 0, lm: Math.PI, lh: 0, rf: Math.PI, rm: 0, rh: Math.PI,
+  };
   private bugHeight = 0.55;
   private heading = Math.PI / 2;
   private velocity = new THREE.Vector3();
   private lastSpeed = 0;
   private autoTurn = 0.6;
-  private legs: { hip: THREE.Group; knee: THREE.Group }[] = [];
-  private legPhase = 0;
-  private readonly legBaseY = -0.12;
-  private readonly tripodA = new Set([0, 4, 2]); // front-left, mid-right, hind-left
   // Real per-brain-region motor drive (see onMetrics) — no per-leg motor
-  // neurons exist in this connectome (brain-only, not the VNC/MANC), so
-  // the tripod gait is synthesized, but its speed/turn/detail signals
-  // below all come straight from actual descending/motor neuron groups.
+  // neurons exist in this connectome (brain-only, not the VNC/MANC), so the
+  // gait *shape* comes from flygym's recorded fly kinematics (fly-rig.ts),
+  // but every signal driving it below comes straight from this session's
+  // own simulated descending/motor neuron groups.
   private turnSkew = 0;
   private brainHeat = 0;
   private neckTurn = 0;
@@ -157,7 +160,7 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
 
     this.buildArena();
     this.buildSugar(this.sugarPos);
-    this.buildBug();
+    void this.buildBug();
     this.camFollowPos.copy(this.bug.position);
 
     this.scene.add(new THREE.HemisphereLight(0xbfdcff, 0x2a3b2a, 0.9));
@@ -256,89 +259,21 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     this.scene.add(this.sugarLight);
   }
 
-  private buildBug(): void {
-    const dark = new THREE.MeshStandardMaterial({ color: 0x3a2a20, roughness: 0.7 });
-    const gloss = new THREE.MeshStandardMaterial({ color: 0x5c3b28, roughness: 0.4 });
-    const glow = new THREE.MeshStandardMaterial({ color: 0xf7b32b, emissive: 0xf7b32b, emissiveIntensity: 0.6, roughness: 0.5 });
-
-    // Thorax (small, between head and abdomen — wings and legs attach here)
-    const thorax = new THREE.Mesh(new THREE.SphereGeometry(0.24, 14, 10), gloss);
-    thorax.scale.set(1.05, 0.85, 0.95);
-    thorax.position.set(0.12, 0.05, 0);
-    this.bug.add(thorax);
-
-    // Abdomen (elongated, tapered rearward — glows with firing-rate heat)
-    this.bugBody = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 12), glow);
-    this.bugBody.scale.set(2.0, 0.78, 0.85);
-    this.bugBody.position.set(-0.42, -0.03, 0);
-    this.bug.add(this.bugBody);
-
-    this.head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 10), dark);
-    this.head.position.set(0.58, 0.1, 0);
-    this.bug.add(this.head);
-    const eyeMat = new THREE.MeshStandardMaterial({ color: 0xb2263e, emissive: 0x8a1428, emissiveIntensity: 0.5, roughness: 0.2 });
-    for (const side of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 10), eyeMat);
-      eye.scale.set(0.9, 1, 1);
-      eye.position.set(0.68, 0.14, side * 0.17);
-      this.bug.add(eye);
-      const anten = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.42, 6), dark);
-      anten.rotation.z = side * -0.9;
-      anten.position.set(0.52, 0.32, side * 0.13);
-      this.bug.add(anten);
-    }
-
-    // Proboscis — retracted under the head by default, extends toward food
-    // when motor_pharynx (a real feeding-circuit motor group) fires.
-    this.proboscis = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.045, 0.3, 6), dark);
-    this.proboscis.geometry.translate(0, -0.15, 0);
-    this.proboscis.rotation.z = Math.PI / 2 + 0.3;
-    this.proboscis.position.set(0.66, -0.02, 0);
-    this.proboscis.scale.y = 0.05;
-    this.bug.add(this.proboscis);
-
-    // Jointed legs: hip (coxa/femur) + knee (tibia), tripod-gait driven.
-    const legXs = [0.3, 0.02, -0.28]; // front / mid / hind hip, relative to thorax
-    this.legs = [];
-    for (const side of [-1, 1]) {
-      for (const x of legXs) {
-        const hip = new THREE.Group();
-        hip.position.set(x, this.legBaseY, side * 0.4);
-        const femur = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.02, 0.26, 6), dark);
-        femur.position.set(0.02, -0.13, side * 0.09);
-        femur.rotation.z = side * 0.5;
-        hip.add(femur);
-
-        const knee = new THREE.Group();
-        knee.position.set(0.045, -0.25, side * 0.16);
-        const tibia = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.01, 0.3, 6), dark);
-        tibia.position.y = -0.15;
-        knee.add(tibia);
-        hip.add(knee);
-
-        this.bug.add(hip);
-        this.legs.push({ hip, knee });
-      }
-    }
-
-    const wingMat = new THREE.MeshStandardMaterial({
-      color: 0xdcefff,
-      transparent: true,
-      opacity: 0.32,
-      roughness: 0.15,
-      metalness: 0.1,
-      side: THREE.DoubleSide,
-    });
-    for (const side of [-1, 1]) {
-      const wing = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.22), wingMat);
-      wing.position.set(0.08, 0.24, side * 0.14);
-      wing.rotation.y = side * 0.55;
-      wing.rotation.z = side * 0.12;
-      this.bug.add(wing);
-    }
-
+  private async buildBug(): Promise<void> {
     this.bug.position.set(0, this.bugHeight, 0);
     this.scene.add(this.bug);
+
+    // Real NeuroMechFly v2 body (meshes + joint hierarchy + recorded gait),
+    // sourced from the flygym project — see public/fly/ATTRIBUTION.md.
+    // Loaded async so a slow connection just delays the fly's appearance,
+    // not the arena/camera/sugar/brain-loop which all work without it.
+    const base = document.baseURI || '/fastfly/';
+    try {
+      this.flyRig = await loadFlyRig(`${base}fly`, 0.62);
+      this.bug.add(this.flyRig.root);
+    } catch (err) {
+      console.error('Fliegen-Körper (flygym-Assets) konnte nicht geladen werden:', err);
+    }
   }
 
   private onMetrics(m: {
@@ -417,8 +352,9 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     // Emit glowing with brain activity; also feeds leg-jitter/step-frequency.
     const heat = THREE.MathUtils.clamp((m['firing_rate'] ?? 0) / 0.05, 0, 1);
     this.brainHeat = heat;
-    const mat = this.bugBody.material as THREE.MeshStandardMaterial;
-    mat.emissiveIntensity = 0.3 + heat * 2.2;
+    for (const mesh of this.flyRig?.abdomenMeshes ?? []) {
+      (mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.15 + heat * 1.6;
+    }
   }
 
   private relocateSugar(): void {
@@ -463,42 +399,38 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     this.bug.position.y = this.bugHeight;
     this.bug.rotation.y = this.heading;
 
-    // Gentle gait wobble
-    this.bugBody.scale.y = 0.78 + Math.sin(performance.now() * 0.012) * 0.04;
+    if (this.flyRig) {
+      const rig = this.flyRig;
+      // Real recorded tripod gait (flygym/NeuroMechFly v2, see fly-rig.ts):
+      // each leg has its own phase clock, sampled into the real 360-sample
+      // per-leg joint-angle table. Every input driving the clocks is a real
+      // brain signal — descending_center sets the base cadence, firing-rate
+      // heat adds a jitter so it visibly reacts to spikes, and the real
+      // descending_left/right differential (turnSkew) speeds up the outer
+      // tripod and slows the inner one, exactly how real hexapod steering
+      // works (no per-leg motor neurons exist in this brain-only connectome
+      // to drive it more directly — see the class comment above).
+      const stepFreq = 3.6 + this.lastSpeed * 3.2 + this.brainHeat * 1.2;
+      const jitter = (Math.random() - 0.5) * this.brainHeat * 0.4;
+      for (const leg of LEG_ORDER) {
+        const isLeftLeg = leg[0] === 'l';
+        const sideFactor = isLeftLeg ? 1 + this.turnSkew * 0.5 : 1 - this.turnSkew * 0.5;
+        this.legPhases[leg] += frameDt * stepFreq * sideFactor + jitter * frameDt;
+        applyLegPhase(rig, leg, this.legPhases[leg]);
+      }
 
-    // Head look (independent of body heading) — driven by real motor_neck.
-    this.head.rotation.y = THREE.MathUtils.lerp(this.head.rotation.y, this.neckTurn, 0.06);
-    // Proboscis extension — driven by real motor_pharynx (feeding reflex).
-    this.proboscis.scale.y = THREE.MathUtils.lerp(
-      this.proboscis.scale.y,
-      0.05 + this.pharynxAmt * 0.95,
-      0.12
-    );
-
-    // Tripod-gait leg walk: two alternating groups of 3 legs. This connectome
-    // has no per-leg motor neurons (it's brain-only, not the VNC/MANC that
-    // actually wires individual legs in a real fly), so the gait itself is
-    // synthesized — but every input driving it is a real brain signal: step
-    // frequency/lift track descending_center + firing-rate heat, and the
-    // left/right amplitude split tracks the real descending_left/right
-    // steering differential (outer legs take bigger steps to turn, like real
-    // hexapod locomotion), plus a firing-rate-linked jitter so the gait
-    // visibly reacts to brain spikes instead of looping identically.
-    const idleTwitch = this.lastSpeed < 0.05;
-    const stepFreq = 3.2 + this.lastSpeed * 2.5 + this.brainHeat * 1.4;
-    this.legPhase += frameDt * stepFreq * (idleTwitch ? 0.2 : 1);
-    const baseAmp = idleTwitch ? 0.06 : THREE.MathUtils.clamp(0.2 + this.lastSpeed * 0.34, 0.2, 0.75);
-    const jitter = (Math.random() - 0.5) * this.brainHeat * 0.12;
-    this.legs.forEach((leg, i) => {
-      const sideFactor = i < 3 ? 1 + this.turnSkew * 0.5 : 1 - this.turnSkew * 0.5;
-      const groupPhase = this.tripodA.has(i) ? 0 : Math.PI;
-      const s = Math.sin(this.legPhase + groupPhase);
-      const amp = Math.max(0.05, baseAmp * sideFactor + jitter);
-      const lift = Math.max(0, s);
-      leg.hip.rotation.x = s * amp;
-      leg.hip.position.y = this.legBaseY + lift * (idleTwitch ? 0.01 : 0.07);
-      leg.knee.rotation.x = -lift * amp * 1.4 - 0.1;
-    });
+      // Cosmetic reuse of two real signals this rig has no dedicated joint
+      // for (the model's head is rigid to the thorax, and its proboscis has
+      // no extension joint): a faint wing twitch from motor_neck, and a
+      // haustellum (mouth-tip) pulse from motor_pharynx on the feeding reflex.
+      const wingTwitch = Math.sin(performance.now() * 0.02) * this.neckTurn * 0.15;
+      rig.wings.left.rotation.z = wingTwitch;
+      rig.wings.right.rotation.z = -wingTwitch;
+      if (rig.haustellum) {
+        const s = 1 + this.pharynxAmt * 0.4;
+        rig.haustellum.scale.set(s, s, s);
+      }
+    }
 
     // Sugar pulse & eat
     this.sugarMesh.rotation.y += frameDt * 2;

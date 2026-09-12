@@ -100,6 +100,88 @@ verursacht, NICHT durch die alte Korruption):
   hätte nie Punkte gezeigt, auch nicht vor dieser Session. Fix: liest jetzt
   `j.classes?.ids_b64`.
 
+## Käfer-Optik, Runde 3: echter NeuroMechFly-v2-Körper (flygym) statt Eigenbau
+Nachdem Runde 2 (siehe unten) die Optik/Steuerung verbessert hatte, fragte der
+User, ob es fortgeschrittenere Open-Source-Projekte zum Abschreiben gibt.
+Recherche ergab zwei einschlägige, aktiv gepflegte Forschungsprojekte:
+
+- **[flygym](https://github.com/NeLy-EPFL/flygym)** (Neuroengineering Lab,
+  EPFL) — Apache-2.0, Nachfolger von NeuroMechFly v1. Hat ein fertiges
+  Browser-Spiel ("NeuroMechFly Live") mit MuJoCo-WASM + Three.js, dessen
+  `gh-pages`-Branch (`wasm/game/assets/`) bereits **decimated, web-taugliche**
+  Assets bereithält (~3,5 MB statt 140 MB roh): 85 anatomisch benannte
+  Mesh-Teile (Coxa/Trochanter-Femur/Tibia/Tarsus 1–5 pro Bein, Halteren,
+  Flügel, Facettenaugen, Kopf/Thorax/Abdomen-Segmente 1–6) sowie
+  `model_meta.json` mit **echten, aus [DeepFly3D](https://github.com/NeLy-EPFL/DeepFly3D)-
+  Aufnahmen gebackenen Pro-Bein-Gelenkwinkel-Trajektorien** (360 Samples ×
+  7 DOF je Bein: Coxa yaw/pitch/roll, Trochanter-Femur pitch/roll, Tibia
+  pitch, Tarsus1 pitch).
+- **[flybody](https://github.com/TuragaLab/flybody)** (Google DeepMind +
+  HHMI Janelia) — dieselbe Körper-Familie, Apache-2.0, aber nur als schwere
+  Rohdaten verfügbar; flygym hat diese Anatomie inzwischen intern übernommen.
+
+Entscheidung: **volle Integration** der echten Mesh-Geometrie + echten
+Gangdaten, aber **ohne MuJoCo-WASM** (kein Physik-Nachbau nötig — wir posen
+das Rig rein kinematisch in three.js) und **ohne** flygyms eigene
+CPG-/Tastatursteuerung — angetrieben stattdessen weiterhin von unseren
+eigenen, echten `descending_center/left/right`-Signalen.
+
+### Was konkret gemacht wurde
+1. `fly.xml` (die geflachte MJCF aus `gh-pages`) mit einem Einweg-Node-Skript
+   geparst (Regex-Tokenizer über `<body>/<joint>/<geom>`, siehe
+   Recherche-Historie) zu einem kompakten `fly-rig.json` (21 KB): Körperbaum
+   ab `c_thorax` mit Position/Quaternion je Body, Gelenkachsen + `springref`
+   (Ruhewinkel) je Joint, Geom→Mesh→Material-Zuordnung.
+2. `model_meta.json`s `preprogrammed.legs` (360×7 pro Bein) + `control.leg_order`/
+   `tripod_map` auf `gait-tables.json` (130 KB) getrimmt.
+3. Die 39 tatsächlich benötigten, **eindeutigen** STL-Dateien heruntergeladen
+   (rechte Körperseite spiegelt via negativem Mesh-Scale dieselbe Datei wie
+   links — aus 85 Mesh-Einträgen werden nur 39 Downloads), macht 3,3 MB.
+   Liegen jetzt unter `fastfly-web/public/fly/stl/`.
+4. Neues Modul `fastfly-web/src/app/fly-rig.ts`: lädt Rig-JSON + Gait-JSON +
+   alle STLs (`THREE.STLLoader`), baut rekursiv die verschachtelte
+   `THREE.Group`-Hierarchie nach — pro Bein 7 verkettete Joint-Pivots in
+   MJCF-Reihenfolge (Coxa yaw→pitch→roll, dann TF pitch→roll, dann Tibia,
+   dann Tarsus1), Tarsus2–5 fix auf ihren `springref`-Ruhewinkel (diese sind
+   im echten Modell ungetrieben/passiv-gefedert, wir simulieren keine
+   Kontaktphysik dafür). `applyLegPhase(rig, leg, phase)` interpoliert die
+   360-Sample-Tabelle bei gegebener Phase linear und schreibt die 7 Winkel
+   direkt in die Joint-Pivots.
+5. `lab-view.ts`: `buildBug()` ist jetzt async, lädt das Rig nach dem
+   Sofort-Start von Arena/Kamera/Sugar/Loop (Fliege erscheint einen Wimpernschlag
+   später, blockiert aber nichts). Pro Bein läuft eine **eigene Phasen-Uhr**
+   (statt einer gemeinsamen mit nur Gruppen-Offset wie in Runde 2) — treibt
+   `applyLegPhase()`; die Kadenz kommt weiterhin aus `descending_center` +
+   Firing-Heat-Jitter, die Innen/Außen-Amplitudenaufteilung beim Abbiegen aus
+   dem echten `descending_left/right`-Differential (jetzt als Phasengeschwindigkeits-
+   Faktor pro Seite statt als Amplitudenskalierung). `motor_neck`/`motor_pharynx`
+   wurden umgewidmet (das echte Modell hat weder Nacken- noch
+   Rüssel-Ausfahr-Gelenk): leichtes Flügel-Zittern bzw. Haustellum-Pulsieren
+   als ehrliche Annäherung, im Code kommentiert. Firing-Rate-Glow sitzt jetzt
+   auf den 5 echten Abdomen-Mesh-Segmenten statt einer Kugel.
+6. Koordinatensystem-Fix: flygym/MuJoCo nutzt lokal +X=vorne, +Y=links,
+   +Z=Rücken; unsere Arena nutzt +X=vorne, +Y=oben. Rig-Root wird um -90°
+   um X gedreht, plus ein empirisch gewählter Skalierungsfaktor (0,62) passend
+   zur bestehenden Arena-/Kamera-Kalibrierung.
+7. `fastfly-web/public/fly/ATTRIBUTION.md` neu — Herkunft/Lizenz (Apache-2.0)
+   und was genau übernommen wurde, für spätere Session/Dritte.
+
+### Ergebnis (Playwright/Chromium gegen die Live-URL verifiziert)
+Echte rote Facettenaugen, feine Antennen, halbtransparente Flügel, Gelenkbeine
+mit sichtbarer Bewegung über mehrere Frames, korrekt proportionierter Kopf/
+Thorax, prall-runder Hinterleib (anatomisch korrekt für eine ausgewachsene
+**weibliche** Fliege — der CT-Scan stammt von einer solchen). Zucker wird
+weiter erkannt/gegessen, keine Konsolenfehler, Kamera-Follow funktioniert
+weiterhin. Bushes in der Arena haben weiterhin keine Kollision (die Fliege
+kann optisch "durch"/"über" sie laufen) — vorbestehende Einschränkung, nicht
+Teil dieser Änderung.
+
+**Nicht behoben / bekannte Vereinfachung**: Bei gespiegelten (rechte Seite)
+Mesh-Kopien wird die Normalen-Neuberechnung nach dem negativen Scale nicht
+explizit für korrekte Flächen-Wicklung gegen-korrigiert — visuell in den
+Tests unauffällig (Beleuchtung ist nachsichtig), aber technisch unsauber;
+falls später Schattenwurf/PBR-Genauigkeit wichtiger wird, dort ansetzen.
+
 ## Käfer-Optik, Runde 2: echter Fliegenkörper + von echten Motorneuronen bewegt
 User-Rückmeldung (zwei Nachrichten): (1) der Käfer sah im Vergleich zu anderen
 Beispielen zu wenig nach Fliege aus, die Beine reagierten nicht wie bei einer
