@@ -1,9 +1,11 @@
 // Loads and assembles the real NeuroMechFly v2 fly body (meshes + joint
-// hierarchy + recorded gait tables), sourced from the flygym project's
-// browser-game assets. See public/fly/ATTRIBUTION.md for provenance/license
-// (Apache-2.0) — only the geometry and the real per-leg joint-angle-vs-phase
-// *shape* are reused; FastFly drives it with its own simulated-brain motor
-// signals, not flygym's own CPG/keyboard controller.
+// hierarchy + recorded gait tables + real CPG topology), sourced from the
+// flygym project's browser-game assets. See public/fly/ATTRIBUTION.md for
+// provenance/license (Apache-2.0) — only the geometry, the real per-leg
+// joint-angle *shape*, and the real coupled-oscillator gait *algorithm* are
+// reused; FastFly drives it with its own simulated-brain motor signals, not
+// flygym's own CPG-drive/keyboard controller, and at our own (much slower,
+// real-time-calibrated) step frequency — see stepCpg()'s comment for why.
 import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 
@@ -53,6 +55,9 @@ export interface GaitTables {
   tripod_map: number[];
   dof_names: string[];
   legs: Record<LegName, { angles: number[][]; neutral: number[]; swing: [number, number] }>;
+  // Real coupled-oscillator topology (dimensionless, timescale-independent —
+  // see stepCpg()): 6x6 coupling weights + phase biases, per-leg convergence.
+  cpg: { coupling_weights: number[][]; phase_biases: number[][]; convergence_coefs: number[] };
 }
 
 export interface FlyRig {
@@ -60,7 +65,10 @@ export interface FlyRig {
   legJoints: Record<LegName, THREE.Group[]>; // 7 joint groups per leg, DOF order above
   abdomenMeshes: THREE.Mesh[]; // for firing-rate glow
   haustellum: THREE.Object3D; // for the pharynx feeding-reflex pulse
-  wings: { left: THREE.Group; right: THREE.Group }; // idle twitch (no flight joint in this walking-only rig)
+  wings: { left: THREE.Group; right: THREE.Group }; // kept still — see class comment in lab-view.ts
+  antennae: { left: THREE.Group; right: THREE.Group }; // synthetic pivot (rig has no real antenna joint), driven by motor_antenna
+  eyes: { left: THREE.MeshStandardMaterial; right: THREE.MeshStandardMaterial }; // for motor_eye shimmer
+  head: THREE.Group; // synthetic pivot (c_head is a fixed geom on the thorax, no joint), driven by motor_neck
   gait: GaitTables;
 }
 
@@ -103,7 +111,25 @@ export async function loadFlyRig(baseUrl: string, scale = 1): Promise<FlyRig> {
   );
 
   const materialCache = new Map<string, THREE.MeshStandardMaterial>();
-  function materialFor(key: string): THREE.MeshStandardMaterial {
+  const eyeMaterials: { left: THREE.MeshStandardMaterial | null; right: THREE.MeshStandardMaterial | null } = {
+    left: null,
+    right: null,
+  };
+  function materialFor(key: string, geomName: string): THREE.MeshStandardMaterial {
+    // Eyes get their own material instance each (not cached by key) so left
+    // and right can shimmer independently from motor_eye.
+    if (key === 'eye') {
+      const rgba = rig.materials['eye'] || [0.67, 0.21, 0.12, 1];
+      const mat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(rgba[0], rgba[1], rgba[2]),
+        roughness: 0.35,
+        emissive: new THREE.Color(rgba[0], rgba[1], rgba[2]),
+        emissiveIntensity: 0.15,
+      });
+      if (geomName === 'l_eye') eyeMaterials.left = mat;
+      if (geomName === 'r_eye') eyeMaterials.right = mat;
+      return mat;
+    }
     let mat = materialCache.get(key);
     if (mat) return mat;
     const rgba = rig.materials[key] || TEXTURE_TONE[key] || [0.6, 0.6, 0.6, 1];
@@ -142,6 +168,8 @@ export async function loadFlyRig(baseUrl: string, scale = 1): Promise<FlyRig> {
   const legJoints: Record<string, THREE.Group[]> = {};
   let haustellum: THREE.Object3D | null = null;
   const wings: { left: THREE.Group | null; right: THREE.Group | null } = { left: null, right: null };
+  const antennae: { left: THREE.Group | null; right: THREE.Group | null } = { left: null, right: null };
+  let head: THREE.Group | null = null;
 
   function buildNode(node: RigNode): THREE.Group {
     const outer = new THREE.Group();
@@ -152,6 +180,19 @@ export async function loadFlyRig(baseUrl: string, scale = 1): Promise<FlyRig> {
     outer.quaternion.set(node.quat[1], node.quat[2], node.quat[3], node.quat[0]);
 
     let inner: THREE.Group = outer;
+
+    // The base rig has no antenna joint at all (fly.xml models pedicel as a
+    // fixed offset) — real flies do deflect their antennae (wind-sensing,
+    // grooming, arousal), and motor_antenna is a real motor-neuron group, so
+    // insert a synthetic pivot here rather than leaving the signal unused.
+    if (node.name === 'l_pedicel' || node.name === 'r_pedicel') {
+      const pivot = new THREE.Group();
+      outer.add(pivot);
+      inner = pivot;
+      if (node.name === 'l_pedicel') antennae.left = pivot;
+      else antennae.right = pivot;
+    }
+
     for (const j of node.joints) {
       const jg = new THREE.Group();
       jg.userData['joint'] = j.name;
@@ -164,11 +205,26 @@ export async function loadFlyRig(baseUrl: string, scale = 1): Promise<FlyRig> {
     }
 
     for (const g of node.geoms) {
-      const mesh = new THREE.Mesh(geometryForMesh(g.mesh), materialFor(g.material));
+      const mesh = new THREE.Mesh(geometryForMesh(g.mesh), materialFor(g.material, g.name));
       if (g.pos) mesh.position.set(...g.pos);
       if (g.quat) mesh.quaternion.set(g.quat[1], g.quat[2], g.quat[3], g.quat[0]);
       mesh.castShadow = true;
-      inner.add(mesh);
+      if (g.name === 'c_head') {
+        // c_head is a fixed geom directly on the thorax, no joint of its own
+        // — wrap it in a synthetic pivot at its attachment point so
+        // motor_neck (a real motor-neuron group) can drive a small head
+        // nod/turn instead of sitting unused.
+        const pivot = new THREE.Group();
+        pivot.position.copy(mesh.position);
+        pivot.quaternion.copy(mesh.quaternion);
+        mesh.position.set(0, 0, 0);
+        mesh.quaternion.identity();
+        pivot.add(mesh);
+        inner.add(pivot);
+        head = pivot;
+      } else {
+        inner.add(mesh);
+      }
       if (g.name.startsWith('c_abdomen')) abdomenMeshes.push(mesh);
       if (g.name === 'c_haustellum') haustellum = mesh;
     }
@@ -211,15 +267,75 @@ export async function loadFlyRig(baseUrl: string, scale = 1): Promise<FlyRig> {
     abdomenMeshes,
     haustellum: haustellum!,
     wings: { left: wings.left!, right: wings.right! },
+    antennae: { left: antennae.left!, right: antennae.right! },
+    eyes: { left: eyeMaterials.left!, right: eyeMaterials.right! },
+    head: head!,
     gait,
   };
 }
 
-// Sample a leg's baked 360-sample joint-angle table at a continuous phase
-// (radians, any range — wrapped to [0, 2π)) with linear interpolation, and
-// write the 7 angles straight into that leg's joint-group rotations.
-export function applyLegPhase(rig: FlyRig, leg: LegName, phase: number): void {
-  const table = rig.gait.legs[leg].angles;
+// --- Real coupled-oscillator CPG (Hopf-style phase + amplitude), the actual
+// algorithm flygym's own game uses (game.js: Controller.stepCPG) — reused
+// verbatim (dimensionless coupling_weights/phase_biases/convergence_coefs
+// from the real model), NOT the naive "replay the table at raw phase" we
+// started with. The key property this buys, which the old version was
+// missing: WALKING SPEED IS CONVEYED BY STRIDE AMPLITUDE, NOT BY SPEEDING UP
+// THE LEG-CYCLE FREQUENCY. Real insects (and this model) keep stepping
+// cadence close to constant across a wide speed range and get from "idle
+// shuffle" to "fast walk" mostly by taking bigger strides — our earlier
+// version instead played the same fixed-amplitude stride back faster and
+// faster with speed, which read as frantic/too-fast blurring rather than
+// purposeful walking.
+//
+// flygym's own intrinsic_freqs (36.0) is calibrated for THEIR pipeline,
+// where the physics runs at MuJoCo's dt=1e-4 and is then displayed at a
+// fixed ~0.1x playback speed — so a human actually perceives ~3.6 Hz, not
+// literally 36. We don't replicate that dt/playback-speed indirection; we
+// integrate directly in real seconds, so BASE_FREQ_HZ below is our own
+// real-time-calibrated pick (matching normal Drosophila walking cadence)
+// rather than flygym's raw constant.
+const BASE_FREQ_HZ = 4.2;
+
+export interface CpgState {
+  phases: Float64Array; // one phase per leg, radians
+  mags: Float64Array; // one stride-amplitude (0..~1) per leg
+}
+
+export function createCpgState(): CpgState {
+  const phases = new Float64Array(6);
+  for (let i = 0; i < 6; i++) phases[i] = Math.random() * Math.PI * 2;
+  return { phases, mags: new Float64Array(6) };
+}
+
+// gainL/gainR: desired stride amplitude for the left/right tripod (0 = stand
+// still, ~1 = full recorded stride), independently — this is exactly how
+// turning works here, same as flygym's own Level-1 CPG game mode: the outer
+// (faster/bigger-striding) side amplitude is higher than the inner side.
+export function stepCpg(rig: FlyRig, state: CpgState, dt: number, gainL: number, gainR: number): void {
+  const { coupling_weights: W, phase_biases: PB, convergence_coefs: conv } = rig.gait.cpg;
+  const { phases: ph, mags: mg } = state;
+  const amps = [gainL, gainL, gainL, gainR, gainR, gainR];
+  const TWO_PI = Math.PI * 2;
+  const dph = new Array(6);
+  for (let i = 0; i < 6; i++) {
+    let coupling = 0;
+    for (let j = 0; j < 6; j++) coupling += mg[j] * W[i][j] * Math.sin(ph[j] - ph[i] - PB[i][j]);
+    dph[i] = TWO_PI * BASE_FREQ_HZ + coupling;
+  }
+  for (let i = 0; i < 6; i++) {
+    ph[i] += dph[i] * dt;
+    mg[i] += conv[i] * (amps[i] - mg[i]) * dt;
+  }
+  for (let i = 0; i < 6; i++) applyLegPhase(rig, LEG_ORDER[i], ph[i], mg[i]);
+}
+
+// Joint angles for one leg at a phase / stride-amplitude, by periodic-lerp of
+// the baked table: angle = neutral + amplitude * (table(phase) - neutral).
+// At amplitude 0 the leg just sits at its neutral standing pose, however
+// fast the phase clock spins — this decoupling of "internal clock speed"
+// from "visible movement extent" is the whole point of the amplitude term.
+function applyLegPhase(rig: FlyRig, leg: LegName, phase: number, amplitude: number): void {
+  const t = rig.gait.legs[leg];
   const n = rig.gait.n_samples;
   const TWO_PI = Math.PI * 2;
   let p = phase % TWO_PI;
@@ -227,12 +343,11 @@ export function applyLegPhase(rig: FlyRig, leg: LegName, phase: number): void {
   const f = (p / TWO_PI) * n;
   const i0 = Math.floor(f) % n;
   const i1 = (i0 + 1) % n;
-  const t = f - Math.floor(f);
-  const row0 = table[i0];
-  const row1 = table[i1];
+  const frac = f - Math.floor(f);
   const groups = rig.legJoints[leg];
   for (let dof = 0; dof < 7; dof++) {
-    const angle = row0[dof] + (row1[dof] - row0[dof]) * t;
+    const samp = t.angles[i0][dof] * (1 - frac) + t.angles[i1][dof] * frac;
+    const angle = t.neutral[dof] + amplitude * (samp - t.neutral[dof]);
     const g = groups[dof];
     if (g) g.rotation[g.userData['axisKey'] as 'x' | 'y' | 'z'] = angle;
   }

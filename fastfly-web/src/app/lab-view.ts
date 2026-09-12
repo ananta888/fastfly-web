@@ -11,7 +11,7 @@ import { CommonModule } from '@angular/common';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { WsService } from './ws.service';
-import { applyLegPhase, FlyRig, LEG_ORDER, LegName, loadFlyRig } from './fly-rig';
+import { createCpgState, CpgState, FlyRig, loadFlyRig, stepCpg } from './fly-rig';
 
 const STIM_LEFT = 'Sugar (left proboscis)';
 const STIM_RIGHT = 'Sugar (right proboscis)';
@@ -89,13 +89,12 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
 
   private bug = new THREE.Group();
   private flyRig?: FlyRig;
-  // Per-leg gait-phase clocks (radians), seeded from the rig's own real
-  // tripod grouping so the two tripod triads start out of phase. Advanced
-  // in loop() and sampled into the real recorded joint-angle table via
-  // applyLegPhase() — see fly-rig.ts.
-  private legPhases: Record<LegName, number> = {
-    lf: 0, lm: Math.PI, lh: 0, rf: Math.PI, rm: 0, rh: Math.PI,
-  };
+  // Real coupled-oscillator CPG state (phase + stride-amplitude per leg) —
+  // see fly-rig.ts's stepCpg() for why this replaced the earlier "just
+  // replay the table faster" approach (it made speed changes look like
+  // frantic fast-forward instead of bigger strides at a roughly steady
+  // cadence, which is how real hexapod walking actually scales with speed).
+  private cpg: CpgState = createCpgState();
   private bugHeight = 0.55;
   private heading = Math.PI / 2;
   private velocity = new THREE.Vector3();
@@ -108,7 +107,9 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
   // own simulated descending/motor neuron groups.
   private turnSkew = 0;
   private brainHeat = 0;
-  private neckTurn = 0;
+  private neckAmt = 0; // motor_neck -> head pivot
+  private antennaAmt = 0; // motor_antenna -> antenna pivot
+  private eyeAmt = 0; // motor_eye -> eye emissive shimmer
   private pharynxAmt = 0;
   private readonly camFollowPos = new THREE.Vector3();
 
@@ -289,6 +290,7 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     const dr = motor['descending_right'] ?? 0;
     const dc = motor['descending_center'] ?? 0;
     const ant = motor['motor_antenna'] ?? 0;
+    const eye = motor['motor_eye'] ?? 0;
     const prob = motor['motor_proboscis'] ?? 0;
     const neck = motor['motor_neck'] ?? 0;
     const pharynx = motor['motor_pharynx'] ?? 0;
@@ -326,15 +328,11 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     // Brain-derived locomotion. descending_center is the connectome's actual
     // whole-body walking-drive neuron group (baseline ~0.2-0.3, fluctuates on
     // its own) — used here instead of a hardcoded constant, so idle walking
-    // speed is genuinely brain-derived, not scripted. proboscis/antenna still
-    // add an appetitive kick on top when the feeding circuits actually fire.
-    // Scaled up ~2.5x from the original tuning: at the old speed a fly this
-    // size only covered ~0.7 body-lengths/sec (real flies do 8-16), which
-    // read as sluggish once the body stopped being an abstract blob and
-    // became a recognizable fly — see the stepFreq comment in loop() for
-    // the matching gait-cadence fix (both need to move together or the legs
-    // visibly slide instead of plant-and-push).
-    const drive = Math.min(6, dc * 9 + prob * 1750 + ant * 1000);
+    // speed is genuinely brain-derived, not scripted. proboscis (feeding
+    // reflex) adds an appetitive kick on top when it actually fires.
+    // motor_antenna no longer feeds drive — it now drives the antenna pivot
+    // directly in loop(), which is a more honest use of that real signal.
+    const drive = Math.min(6, dc * 9 + prob * 1750);
     const steer = THREE.MathUtils.clamp((dr - dl) * 140, -2.6, 2.6);
     if (!this.detected()) this.autoTurn += (Math.random() - 0.5) * 0.28;
     else this.autoTurn *= 0.8;
@@ -346,12 +344,17 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
       0,
       Math.cos(this.heading) * this.lastSpeed
     );
-    // Real descending_left/right differential also skews the leg-swing
-    // amplitude between the two sides in loop() (outer legs step bigger to
-    // turn, as in real hexapod steering) — not just the heading.
+    // Real descending_left/right differential also skews CPG stride
+    // amplitude between the two sides in loop() (outer tripod strides
+    // bigger to turn, as in real hexapod steering) — not just the heading.
     this.turnSkew = THREE.MathUtils.clamp(steer / 2.6, -1, 1);
-    // Neck motor neurons drive an independent head look, on top of body heading.
-    this.neckTurn = THREE.MathUtils.clamp((neck - 0.03) * 30, -0.5, 0.5);
+    // Neck motor neurons drive the (synthetic) head pivot.
+    this.neckAmt = THREE.MathUtils.clamp((neck - 0.03) * 30, -0.5, 0.5);
+    // Antenna motor neurons drive the (synthetic) antenna pivot.
+    this.antennaAmt = THREE.MathUtils.clamp((ant - 0.018) * 40, -1, 1);
+    // Eye motor neurons drive a photoreceptor-activity shimmer (real
+    // compound eyes don't rotate, so movement would misrepresent the signal).
+    this.eyeAmt = THREE.MathUtils.clamp((eye - 0.028) * 25, 0, 1);
     // Pharynx motor neurons drive the proboscis extension (feeding reflex).
     this.pharynxAmt = THREE.MathUtils.clamp((pharynx - 0.009) * 60, 0, 1);
 
@@ -407,36 +410,48 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
 
     if (this.flyRig) {
       const rig = this.flyRig;
-      // Real recorded tripod gait (flygym/NeuroMechFly v2, see fly-rig.ts):
-      // each leg has its own phase clock, sampled into the real 360-sample
-      // per-leg joint-angle table. Every input driving the clocks is a real
-      // brain signal — descending_center sets the base cadence, firing-rate
-      // heat adds a jitter so it visibly reacts to spikes, and the real
-      // descending_left/right differential (turnSkew) speeds up the outer
-      // tripod and slows the inner one, exactly how real hexapod steering
-      // works (no per-leg motor neurons exist in this brain-only connectome
-      // to drive it more directly — see the class comment above).
-      // Baseline matches flygym's own CPG intrinsic frequency (~36 rad/s,
-      // ~5.7 Hz — real fly stepping range) instead of an arbitrarily chosen
-      // number; the old value here (~3.6-11) was 3-5x too slow and read as
-      // slow-motion, which stood out a lot more once the body actually
-      // looked like a real fly instead of a glowing blob.
-      const stepFreq = 26 + this.lastSpeed * 5 + this.brainHeat * 4;
-      const jitter = (Math.random() - 0.5) * this.brainHeat * 0.4;
-      for (const leg of LEG_ORDER) {
-        const isLeftLeg = leg[0] === 'l';
-        const sideFactor = isLeftLeg ? 1 + this.turnSkew * 0.5 : 1 - this.turnSkew * 0.5;
-        this.legPhases[leg] += frameDt * stepFreq * sideFactor + jitter * frameDt;
-        applyLegPhase(rig, leg, this.legPhases[leg]);
-      }
+      // Real coupled-oscillator CPG (flygym/NeuroMechFly v2's own algorithm —
+      // see fly-rig.ts's stepCpg() for the equations and why). Stride
+      // *amplitude* (not stepping frequency) is what conveys speed, matching
+      // how real hexapod walking actually scales — the earlier version sped
+      // up the leg-cycle frequency itself with speed, which looked like a
+      // frantic fast-forward instead of a fly taking bigger steps.
+      // gainL/gainR: desired stride amplitude per tripod side. Base level
+      // from lastSpeed (descending_center-driven, see onMetrics), asymmetry
+      // from the real descending_left/right differential (turnSkew) — outer
+      // side strides bigger to turn, same mechanism flygym's own game uses
+      // for steering. Never fully 0: a standing fly still shifts its footing
+      // slightly rather than freezing solid.
+      const baseGain = THREE.MathUtils.clamp(0.12 + this.lastSpeed * 0.22, 0.12, 1.1);
+      const gainL = THREE.MathUtils.clamp(baseGain * (1 + this.turnSkew * 0.6), 0, 1.3);
+      const gainR = THREE.MathUtils.clamp(baseGain * (1 - this.turnSkew * 0.6), 0, 1.3);
+      stepCpg(rig, this.cpg, frameDt, gainL, gainR);
 
-      // Cosmetic reuse of two real signals this rig has no dedicated joint
-      // for (the model's head is rigid to the thorax, and its proboscis has
-      // no extension joint): a faint wing twitch from motor_neck, and a
-      // haustellum (mouth-tip) pulse from motor_pharynx on the feeding reflex.
-      const wingTwitch = Math.sin(performance.now() * 0.02) * this.neckTurn * 0.15;
-      rig.wings.left.rotation.z = wingTwitch;
-      rig.wings.right.rotation.z = -wingTwitch;
+      // Real per-signal wiring for the parts this rig has no baked joint for:
+      // - motor_neck -> a small head nod/turn on the synthetic head pivot
+      //   (the model fuses the head rigidly to the thorax; no real neck DOF
+      //   exists to sample, so this is a direct, honest, small-amplitude use
+      //   of the real signal rather than a repurposed proxy).
+      // - motor_antenna -> antenna deflection on the synthetic antenna pivot
+      //   (real flies do deflect their antennae; the base rig has no joint
+      //   there either).
+      // - motor_eye -> a faint emissive shimmer on the compound eyes. Real
+      //   compound eyes don't rotate like vertebrate eyes, so "movement"
+      //   would be dishonest; a photoreceptor-activity shimmer is the
+      //   closest visualizable, non-misleading use of this real signal.
+      // - Wings are intentionally left still: this connectome has no wing
+      //   motor-neuron group at all (only descending_*/antenna/eye/neck/
+      //   pharynx/proboscis), and real Drosophila keep their wings folded
+      //   while walking anyway — animating them would be neither
+      //   brain-driven nor biologically accurate.
+      if (rig.head) {
+        rig.head.rotation.y = THREE.MathUtils.lerp(rig.head.rotation.y, this.neckAmt, 0.08);
+      }
+      const antennaAngle = this.antennaAmt * 0.35;
+      if (rig.antennae.left) rig.antennae.left.rotation.z = antennaAngle;
+      if (rig.antennae.right) rig.antennae.right.rotation.z = -antennaAngle;
+      if (rig.eyes.left) rig.eyes.left.emissiveIntensity = 0.1 + this.eyeAmt * 0.9;
+      if (rig.eyes.right) rig.eyes.right.emissiveIntensity = 0.1 + this.eyeAmt * 0.9;
       if (rig.haustellum) {
         const s = 1 + this.pharynxAmt * 0.4;
         rig.haustellum.scale.set(s, s, s);

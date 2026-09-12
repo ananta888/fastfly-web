@@ -100,6 +100,59 @@ verursacht, NICHT durch die alte Korruption):
   hätte nie Punkte gezeigt, auch nicht vor dieser Session. Fix: liest jetzt
   `j.classes?.ids_b64`.
 
+## Käfer-Optik, Runde 4: echter CPG statt "Tabelle einfach schneller abspielen"
+User-Rückmeldung nach Runde 3: Beine viel zu schnell, Flügel zu starr, und
+Beine/Flügel nicht sauber ans Gehirn angebunden. Zusätzliche Frage: sind
+Augen und Fühler richtig verdrahtet? Antwort vorher: nein, `motor_antenna`
+floss nur in die generische Lauf-Geschwindigkeit ein, `motor_eye` wurde
+komplett ignoriert, und die Flügel wurden über einen falschen Proxy
+(`motor_neck`) bewegt.
+
+**Recherche**: `game.js`s echte `Controller.stepCPG()`-Methode (dieselbe
+Quelle wie die Gait-Tabellen) zeigt das eigentliche Prinzip: ein gekoppeltes
+Phasen-Oszillator-Netzwerk (6 Beine, echte `coupling_weights`/`phase_biases`/
+`convergence_coefs` aus dem Modell) mit **Phase UND Amplitude** pro Bein.
+Der entscheidende, vorher fehlende Mechanismus: `winkel = neutral + amplitude
+* (tabelle(phase) - neutral)` — bei Amplitude 0 steht das Bein einfach in
+Ruhestellung, egal wie schnell die interne Phasenuhr weiterläuft.
+**Echte Insekten (und dieses Modell) zeigen Tempo primär über die
+Schrittweite (Amplitude), nicht über eine schnellere Schrittfrequenz.**
+Runde 3 hat exakt das falsch gemacht: dieselbe volle Schrittbewegung einfach
+schneller abgespielt, was wie hektisches Vorspulen wirkte statt wie
+zielgerichtetes Laufen. flygyms eigener `intrinsic_freqs`-Wert (36) ist
+zudem für deren eigene dt=1e-4 + 0.1×-Playback-Pipeline kalibriert und
+entspricht dort wahrgenommenen ~3,6 Hz — nicht 36 rad/s, wie in Runde 3
+direkt übernommen (daher u. a. die überhöhte Geschwindigkeit).
+
+**Umgesetzt** (`fly-rig.ts`: `createCpgState()`/`stepCpg()`, ersetzt
+`applyLegPhase()`):
+- Echtes gekoppeltes Oszillatornetzwerk mit den echten Kopplungsmatrizen aus
+  `gait-tables.json` (jetzt inkl. `cpg`-Block, vorher rausgekürzt).
+- Eigene, für Echtzeit kalibrierte Basisfrequenz (4,2 Hz, konstant) statt
+  geschwindigkeitsabhängiger Frequenz — Tempo kommt jetzt über
+  `gainL`/`gainR` (Ziel-Schrittweite pro Körperseite), gespeist aus
+  `lastSpeed` (Grundamplitude) und dem echten `descending_left/right`-
+  Differential (Asymmetrie zum Abbiegen) — exakt das Lenkprinzip, das
+  flygyms eigenes Level-1-CPG-Spiel verwendet.
+- **Echte Kopf-/Fühler-Pivots ergänzt** (das Rig selbst hat dafür keine
+  Gelenke — `c_head` ist nur ein fixes Geom auf dem Thorax, Pedicel/Fühler
+  sind fixe Offsets ohne Joint): synthetische Pivots eingebaut, damit
+  `motor_neck` echt den Kopf und `motor_antenna` echt die Fühler bewegt,
+  statt wie vorher in die generische Antriebsgeschwindigkeit gemischt zu
+  werden.
+- **`motor_eye` jetzt genutzt**: echte Facettenaugen rotieren biologisch
+  nicht (anders als Wirbeltieraugen) — Bewegung wäre unehrlich. Stattdessen
+  treibt das Signal ein leises Emissive-Schimmern (Photorezeptor-Aktivität).
+- **Flügel bewusst ruhig gelassen**: das Connectome hat gar keine
+  Flügel-Motorneuronen-Gruppe (nur descending_*/antenna/eye/neck/pharynx/
+  proboscis existieren), und echte Drosophila halten die Flügel beim Laufen
+  ohnehin angelegt — Bewegung wäre weder hirngesteuert noch biologisch
+  korrekt gewesen. Der alte `neckTurn`-Flügel-Zitter-Hack ist entfernt.
+
+**Live verifiziert**: Beinstellungen ändern sich zwischen Frames in einem
+plausiblen, nicht mehr hektischen Takt; Zucker wird weiterhin erkannt und
+gegessen; keine Konsolenfehler.
+
 ## Käfer-Optik, Runde 3: echter NeuroMechFly-v2-Körper (flygym) statt Eigenbau
 Nachdem Runde 2 (siehe unten) die Optik/Steuerung verbessert hatte, fragte der
 User, ob es fortgeschrittenere Open-Source-Projekte zum Abschreiben gibt.
