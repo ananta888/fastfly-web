@@ -93,10 +93,20 @@ function axisIndex(axis: [number, number, number]): 0 | 1 | 2 {
 }
 const AXIS_KEY = ['x', 'y', 'z'] as const;
 
+// public/fly/*.json aren't filename-hashed by the Angular build (unlike the
+// JS bundle), so a browser can serve a stale cached copy after a deploy that
+// changed their shape — that's what caused a "can't zoom, fly gone" report
+// once (a cached pre-CPG gait-tables.json threw in stepCpg() every frame,
+// before ever reaching controls.update()/render() — see the try/catch around
+// stepFlyRig() in lab-view.ts). Bump this whenever these JSON files' shape
+// changes, to force a fresh fetch instead of relying on cache headers alone.
+const ASSET_VERSION = 2;
+
 export async function loadFlyRig(baseUrl: string, scale = 1): Promise<FlyRig> {
+  const v = `?v=${ASSET_VERSION}`;
   const [rig, gait] = await Promise.all([
-    fetch(`${baseUrl}/fly-rig.json`).then((r) => r.json() as Promise<RigFile>),
-    fetch(`${baseUrl}/gait-tables.json`).then((r) => r.json() as Promise<GaitTables>),
+    fetch(`${baseUrl}/fly-rig.json${v}`).then((r) => r.json() as Promise<RigFile>),
+    fetch(`${baseUrl}/gait-tables.json${v}`).then((r) => r.json() as Promise<GaitTables>),
   ]);
 
   const stlLoader = new STLLoader();

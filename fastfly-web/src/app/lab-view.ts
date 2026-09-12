@@ -409,8 +409,52 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     this.bug.rotation.y = this.heading;
 
     if (this.flyRig) {
-      const rig = this.flyRig;
-      // Real coupled-oscillator CPG (flygym/NeuroMechFly v2's own algorithm —
+      try {
+        this.stepFlyRig(this.flyRig, frameDt);
+      } catch (err) {
+        // Any bug here (e.g. a stale-cached gait-tables.json missing a field
+        // a newer build expects — these public/ JSON assets aren't
+        // filename-hashed, so a browser can serve an old cached copy after a
+        // deploy) would otherwise throw every single frame, forever, before
+        // reaching camera-follow/controls.update()/render() below — freezing
+        // the whole view (no zoom, no drag, fly gone) with no visible cause.
+        // Drop the rig instead of crash-looping the render loop over it.
+        console.error('Fliegen-Rig deaktiviert nach Fehler in stepCpg (evtl. alter Browser-Cache — Seite neu laden):', err);
+        this.flyRig = undefined;
+      }
+    }
+
+    // Sugar pulse & eat
+    this.sugarMesh.rotation.y += frameDt * 2;
+    const pulse = 1 + Math.sin(performance.now() * 0.006) * 0.08;
+    this.sugarMesh.scale.setScalar(pulse);
+    this.sugarMat.emissiveIntensity = 1.2 + Math.sin(performance.now() * 0.008) * 0.7;
+    this.sugarLight.intensity = 4 + Math.sin(performance.now() * 0.008) * 3;
+
+    const toSugar = new THREE.Vector3().subVectors(this.sugarPos, this.bug.position);
+    toSugar.y = 0;
+    if (toSugar.length() < SUGAR_EAT) {
+      this.eatenCount.update((n) => n + 1);
+      this.relocateSugar();
+    }
+
+    // Follow the bug: shift camera + orbit target by however far it moved
+    // this frame, preserving whatever zoom/angle the user has dialed in.
+    const followDelta = new THREE.Vector3().subVectors(this.bug.position, this.camFollowPos);
+    if (this.controls && (followDelta.x !== 0 || followDelta.z !== 0)) {
+      this.camera.position.add(followDelta);
+      this.controls.target.add(followDelta);
+      this.camFollowPos.copy(this.bug.position);
+    }
+
+    this.controls?.update();
+    this.renderer?.render(this.scene, this.camera);
+  };
+
+  // Split out of loop() so a bug in here can be caught without ever risking
+  // skipping controls.update()/render() below it — see the try/catch above.
+  private stepFlyRig(rig: FlyRig, frameDt: number): void {
+    // Real coupled-oscillator CPG (flygym/NeuroMechFly v2's own algorithm —
       // see fly-rig.ts's stepCpg() for the equations and why). Stride
       // *amplitude* (not stepping frequency) is what conveys speed, matching
       // how real hexapod walking actually scales — the earlier version sped
@@ -452,36 +496,9 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
       if (rig.antennae.right) rig.antennae.right.rotation.z = -antennaAngle;
       if (rig.eyes.left) rig.eyes.left.emissiveIntensity = 0.1 + this.eyeAmt * 0.9;
       if (rig.eyes.right) rig.eyes.right.emissiveIntensity = 0.1 + this.eyeAmt * 0.9;
-      if (rig.haustellum) {
-        const s = 1 + this.pharynxAmt * 0.4;
-        rig.haustellum.scale.set(s, s, s);
-      }
+    if (rig.haustellum) {
+      const s = 1 + this.pharynxAmt * 0.4;
+      rig.haustellum.scale.set(s, s, s);
     }
-
-    // Sugar pulse & eat
-    this.sugarMesh.rotation.y += frameDt * 2;
-    const pulse = 1 + Math.sin(performance.now() * 0.006) * 0.08;
-    this.sugarMesh.scale.setScalar(pulse);
-    this.sugarMat.emissiveIntensity = 1.2 + Math.sin(performance.now() * 0.008) * 0.7;
-    this.sugarLight.intensity = 4 + Math.sin(performance.now() * 0.008) * 3;
-
-    const toSugar = new THREE.Vector3().subVectors(this.sugarPos, this.bug.position);
-    toSugar.y = 0;
-    if (toSugar.length() < SUGAR_EAT) {
-      this.eatenCount.update((n) => n + 1);
-      this.relocateSugar();
-    }
-
-    // Follow the bug: shift camera + orbit target by however far it moved
-    // this frame, preserving whatever zoom/angle the user has dialed in.
-    const followDelta = new THREE.Vector3().subVectors(this.bug.position, this.camFollowPos);
-    if (this.controls && (followDelta.x !== 0 || followDelta.z !== 0)) {
-      this.camera.position.add(followDelta);
-      this.controls.target.add(followDelta);
-      this.camFollowPos.copy(this.bug.position);
-    }
-
-    this.controls?.update();
-    this.renderer?.render(this.scene, this.camera);
-  };
+  }
 }
