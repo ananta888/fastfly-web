@@ -93,6 +93,10 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
   private velocity = new THREE.Vector3();
   private lastSpeed = 0;
   private autoTurn = 0.6;
+  private legs: THREE.Group[] = [];
+  private legPhase = 0;
+  private readonly legBaseY = -0.12;
+  private readonly tripodA = new Set([0, 4, 2]); // front-left, mid-right, hind-left
 
   private sugarMesh!: THREE.Mesh;
   private sugarMat!: THREE.MeshStandardMaterial;
@@ -108,8 +112,8 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
 
   ngOnInit(): void {
     this.ws.messages.subscribe((m) => {
-      if (m.type === 'state') this.running.set(Boolean(m.running));
-      else if (m.type === 'metrics') this.onMetrics(m as any);
+      if (m['type'] === 'state') this.running.set(Boolean(m['running']));
+      else if (m['type'] === 'metrics') this.onMetrics(m as any);
     });
     if (!this.ws.connected()) this.ws.connect();
     this.ws.send({ cmd: 'start' });
@@ -244,7 +248,7 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
 
     this.bugBody = new THREE.Mesh(new THREE.SphereGeometry(0.42, 16, 12), glow);
     this.bugBody.scale.set(1.4, 0.72, 0.9);
-    this.bug.body.add(this.bugBody);
+    this.bug.add(this.bugBody);
 
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 10), dark);
     head.position.set(0.5, 0.08, 0);
@@ -259,10 +263,35 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
       anten.position.set(0.42, 0.34, side * 0.2);
       this.bug.add(anten);
     }
-    for (let l = 0; l < 6; l++) {
-      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.5, 6), dark);
-      leg.position.set(-0.05 + l * 0.14 - 0.28, -0.35, (l % 2 === 0 ? -1 : 1) * 0.42);
-      this.bug.add(leg);
+    const legXs = [0.32, 0, -0.32]; // front / mid / hind hip, relative to thorax
+    this.legs = [];
+    for (const side of [-1, 1]) {
+      for (const x of legXs) {
+        const pivot = new THREE.Group();
+        pivot.position.set(x, this.legBaseY, side * 0.38);
+        const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.018, 0.5, 6), dark);
+        leg.position.y = -0.25;
+        leg.rotation.z = side * 0.18;
+        pivot.add(leg);
+        this.bug.add(pivot);
+        this.legs.push(pivot);
+      }
+    }
+
+    const wingMat = new THREE.MeshStandardMaterial({
+      color: 0xdcefff,
+      transparent: true,
+      opacity: 0.32,
+      roughness: 0.15,
+      metalness: 0.1,
+      side: THREE.DoubleSide,
+    });
+    for (const side of [-1, 1]) {
+      const wing = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.22), wingMat);
+      wing.position.set(-0.02, 0.22, side * 0.14);
+      wing.rotation.y = side * 0.55;
+      wing.rotation.z = side * 0.12;
+      this.bug.add(wing);
     }
 
     this.bug.position.set(0, this.bugHeight, 0);
@@ -277,7 +306,7 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
   }): void {
     this.running.set(true);
 
-    const motor = m.motor_rates ?? {};
+    const motor = m['motor_rates'] ?? {};
     const dl = motor['descending_left'] ?? 0;
     const dr = motor['descending_right'] ?? 0;
     const ant = motor['motor_antenna'] ?? 0;
@@ -328,7 +357,7 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     );
 
     // Emit glowing with brain activity
-    const heat = THREE.MathUtils.clamp((m.firing_rate ?? 0) / 0.05, 0, 1);
+    const heat = THREE.MathUtils.clamp((m['firing_rate'] ?? 0) / 0.05, 0, 1);
     const mat = this.bugBody.material as THREE.MeshStandardMaterial;
     mat.emissiveIntensity = 0.3 + heat * 2.2;
   }
@@ -378,6 +407,18 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     // Gentle gait wobble
     this.bugBody.scale.y = 0.72 + Math.sin(performance.now() * 0.012) * 0.05;
 
+    // Tripod-gait leg walk: two alternating groups of 3 legs, speed-driven
+    const idleTwitch = this.lastSpeed < 0.05;
+    const stepFreq = 3.2 + this.lastSpeed * 2.5;
+    this.legPhase += frameDt * stepFreq * (idleTwitch ? 0.2 : 1);
+    const swingAmp = idleTwitch ? 0.06 : THREE.MathUtils.clamp(0.18 + this.lastSpeed * 0.32, 0.18, 0.7);
+    this.legs.forEach((pivot, i) => {
+      const groupPhase = this.tripodA.has(i) ? 0 : Math.PI;
+      const s = Math.sin(this.legPhase + groupPhase);
+      pivot.rotation.x = s * swingAmp;
+      pivot.position.y = this.legBaseY + Math.max(0, s) * (idleTwitch ? 0.01 : 0.07);
+    });
+
     // Sugar pulse & eat
     this.sugarMesh.rotation.y += frameDt * 2;
     const pulse = 1 + Math.sin(performance.now() * 0.006) * 0.08;
@@ -395,3 +436,4 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     this.controls?.update();
     this.renderer?.render(this.scene, this.camera);
   };
+}

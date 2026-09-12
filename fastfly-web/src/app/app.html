@@ -65,9 +65,13 @@
       </p>
     </aside>
 
-    <section class="brain-wrap panel">
+    <section class="brain-wrap panel" *ngIf="mode() === 'brain'">
       <app-brain-view #brain></app-brain-view>
       <div class="brain-overlay">Gelbe Punkte = aktive Neuronen dieser Runde</div>
+    </section>
+
+    <section class="brain-wrap panel" *ngIf="mode() === 'arena'">
+      <app-lab-view #lab></app-lab-view>
     </section>
 
     <aside class="panel panel-right">
