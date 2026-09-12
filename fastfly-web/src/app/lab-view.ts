@@ -87,16 +87,27 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
   private controls!: OrbitControls;
 
   private bug = new THREE.Group();
-  private bugBody!: THREE.Mesh;
+  private bugBody!: THREE.Mesh; // abdomen (glow = firing-rate heat)
+  private head!: THREE.Mesh;
+  private proboscis!: THREE.Mesh;
   private bugHeight = 0.55;
   private heading = Math.PI / 2;
   private velocity = new THREE.Vector3();
   private lastSpeed = 0;
   private autoTurn = 0.6;
-  private legs: THREE.Group[] = [];
+  private legs: { hip: THREE.Group; knee: THREE.Group }[] = [];
   private legPhase = 0;
   private readonly legBaseY = -0.12;
   private readonly tripodA = new Set([0, 4, 2]); // front-left, mid-right, hind-left
+  // Real per-brain-region motor drive (see onMetrics) — no per-leg motor
+  // neurons exist in this connectome (brain-only, not the VNC/MANC), so
+  // the tripod gait is synthesized, but its speed/turn/detail signals
+  // below all come straight from actual descending/motor neuron groups.
+  private turnSkew = 0;
+  private brainHeat = 0;
+  private neckTurn = 0;
+  private pharynxAmt = 0;
+  private readonly camFollowPos = new THREE.Vector3();
 
   private sugarMesh!: THREE.Mesh;
   private sugarMat!: THREE.MeshStandardMaterial;
@@ -134,16 +145,20 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
       0.1,
       100
     );
-    this.camera.position.set(11, 13, 14);
-    this.camera.lookAt(0, 0, 0);
+    this.camera.position.set(4.2, 3.4, 5.2);
+    this.camera.lookAt(0, this.bugHeight, 0);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
+    this.controls.minDistance = 1.5;
+    this.controls.maxDistance = 22;
+    this.controls.target.set(0, this.bugHeight, 0);
 
     this.buildArena();
     this.buildSugar(this.sugarPos);
     this.buildBug();
+    this.camFollowPos.copy(this.bug.position);
 
     this.scene.add(new THREE.HemisphereLight(0xbfdcff, 0x2a3b2a, 0.9));
     const sun = new THREE.DirectionalLight(0xfff2cc, 1.4);
@@ -246,35 +261,63 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     const gloss = new THREE.MeshStandardMaterial({ color: 0x5c3b28, roughness: 0.4 });
     const glow = new THREE.MeshStandardMaterial({ color: 0xf7b32b, emissive: 0xf7b32b, emissiveIntensity: 0.6, roughness: 0.5 });
 
-    this.bugBody = new THREE.Mesh(new THREE.SphereGeometry(0.42, 16, 12), glow);
-    this.bugBody.scale.set(1.4, 0.72, 0.9);
+    // Thorax (small, between head and abdomen — wings and legs attach here)
+    const thorax = new THREE.Mesh(new THREE.SphereGeometry(0.24, 14, 10), gloss);
+    thorax.scale.set(1.05, 0.85, 0.95);
+    thorax.position.set(0.12, 0.05, 0);
+    this.bug.add(thorax);
+
+    // Abdomen (elongated, tapered rearward — glows with firing-rate heat)
+    this.bugBody = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 12), glow);
+    this.bugBody.scale.set(2.0, 0.78, 0.85);
+    this.bugBody.position.set(-0.42, -0.03, 0);
     this.bug.add(this.bugBody);
 
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 10), dark);
-    head.position.set(0.5, 0.08, 0);
-    this.bug.add(head);
-    const eyeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.7 });
+    this.head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 10), dark);
+    this.head.position.set(0.58, 0.1, 0);
+    this.bug.add(this.head);
+    const eyeMat = new THREE.MeshStandardMaterial({ color: 0xb2263e, emissive: 0x8a1428, emissiveIntensity: 0.5, roughness: 0.2 });
     for (const side of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), eyeMat);
-      eye.position.set(0.62, 0.14, side * 0.16);
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 10), eyeMat);
+      eye.scale.set(0.9, 1, 1);
+      eye.position.set(0.68, 0.14, side * 0.17);
       this.bug.add(eye);
-      const anten = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.55, 6), dark);
+      const anten = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.42, 6), dark);
       anten.rotation.z = side * -0.9;
-      anten.position.set(0.42, 0.34, side * 0.2);
+      anten.position.set(0.52, 0.32, side * 0.13);
       this.bug.add(anten);
     }
-    const legXs = [0.32, 0, -0.32]; // front / mid / hind hip, relative to thorax
+
+    // Proboscis — retracted under the head by default, extends toward food
+    // when motor_pharynx (a real feeding-circuit motor group) fires.
+    this.proboscis = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.045, 0.3, 6), dark);
+    this.proboscis.geometry.translate(0, -0.15, 0);
+    this.proboscis.rotation.z = Math.PI / 2 + 0.3;
+    this.proboscis.position.set(0.66, -0.02, 0);
+    this.proboscis.scale.y = 0.05;
+    this.bug.add(this.proboscis);
+
+    // Jointed legs: hip (coxa/femur) + knee (tibia), tripod-gait driven.
+    const legXs = [0.3, 0.02, -0.28]; // front / mid / hind hip, relative to thorax
     this.legs = [];
     for (const side of [-1, 1]) {
       for (const x of legXs) {
-        const pivot = new THREE.Group();
-        pivot.position.set(x, this.legBaseY, side * 0.38);
-        const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.018, 0.5, 6), dark);
-        leg.position.y = -0.25;
-        leg.rotation.z = side * 0.18;
-        pivot.add(leg);
-        this.bug.add(pivot);
-        this.legs.push(pivot);
+        const hip = new THREE.Group();
+        hip.position.set(x, this.legBaseY, side * 0.4);
+        const femur = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.02, 0.26, 6), dark);
+        femur.position.set(0.02, -0.13, side * 0.09);
+        femur.rotation.z = side * 0.5;
+        hip.add(femur);
+
+        const knee = new THREE.Group();
+        knee.position.set(0.045, -0.25, side * 0.16);
+        const tibia = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.01, 0.3, 6), dark);
+        tibia.position.y = -0.15;
+        knee.add(tibia);
+        hip.add(knee);
+
+        this.bug.add(hip);
+        this.legs.push({ hip, knee });
       }
     }
 
@@ -288,7 +331,7 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     });
     for (const side of [-1, 1]) {
       const wing = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.22), wingMat);
-      wing.position.set(-0.02, 0.22, side * 0.14);
+      wing.position.set(0.08, 0.24, side * 0.14);
       wing.rotation.y = side * 0.55;
       wing.rotation.z = side * 0.12;
       this.bug.add(wing);
@@ -309,8 +352,11 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     const motor = m['motor_rates'] ?? {};
     const dl = motor['descending_left'] ?? 0;
     const dr = motor['descending_right'] ?? 0;
+    const dc = motor['descending_center'] ?? 0;
     const ant = motor['motor_antenna'] ?? 0;
     const prob = motor['motor_proboscis'] ?? 0;
+    const neck = motor['motor_neck'] ?? 0;
+    const pharynx = motor['motor_pharynx'] ?? 0;
 
     const now = performance.now();
     const dt = Math.min(0.2, Math.max(0.01, (now - this.lastMetricsAt) / 1000));
@@ -342,8 +388,12 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
       this.lastStimRefreshed = now;
     }
 
-    // Brain-derived locomotion: bump while hungry, steer by descending activity
-    const drive = Math.min(2.4, 0.9 + prob * 900 + ant * 500);
+    // Brain-derived locomotion. descending_center is the connectome's actual
+    // whole-body walking-drive neuron group (baseline ~0.2-0.3, fluctuates on
+    // its own) — used here instead of a hardcoded constant, so idle walking
+    // speed is genuinely brain-derived, not scripted. proboscis/antenna still
+    // add an appetitive kick on top when the feeding circuits actually fire.
+    const drive = Math.min(2.4, dc * 3.6 + prob * 700 + ant * 400);
     const steer = THREE.MathUtils.clamp((dr - dl) * 140, -2.6, 2.6);
     if (!this.detected()) this.autoTurn += (Math.random() - 0.5) * 0.28;
     else this.autoTurn *= 0.8;
@@ -355,9 +405,18 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
       0,
       Math.cos(this.heading) * this.lastSpeed
     );
+    // Real descending_left/right differential also skews the leg-swing
+    // amplitude between the two sides in loop() (outer legs step bigger to
+    // turn, as in real hexapod steering) — not just the heading.
+    this.turnSkew = THREE.MathUtils.clamp(steer / 2.6, -1, 1);
+    // Neck motor neurons drive an independent head look, on top of body heading.
+    this.neckTurn = THREE.MathUtils.clamp((neck - 0.03) * 30, -0.5, 0.5);
+    // Pharynx motor neurons drive the proboscis extension (feeding reflex).
+    this.pharynxAmt = THREE.MathUtils.clamp((pharynx - 0.009) * 60, 0, 1);
 
-    // Emit glowing with brain activity
+    // Emit glowing with brain activity; also feeds leg-jitter/step-frequency.
     const heat = THREE.MathUtils.clamp((m['firing_rate'] ?? 0) / 0.05, 0, 1);
+    this.brainHeat = heat;
     const mat = this.bugBody.material as THREE.MeshStandardMaterial;
     mat.emissiveIntensity = 0.3 + heat * 2.2;
   }
@@ -405,18 +464,40 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     this.bug.rotation.y = this.heading;
 
     // Gentle gait wobble
-    this.bugBody.scale.y = 0.72 + Math.sin(performance.now() * 0.012) * 0.05;
+    this.bugBody.scale.y = 0.78 + Math.sin(performance.now() * 0.012) * 0.04;
 
-    // Tripod-gait leg walk: two alternating groups of 3 legs, speed-driven
+    // Head look (independent of body heading) — driven by real motor_neck.
+    this.head.rotation.y = THREE.MathUtils.lerp(this.head.rotation.y, this.neckTurn, 0.06);
+    // Proboscis extension — driven by real motor_pharynx (feeding reflex).
+    this.proboscis.scale.y = THREE.MathUtils.lerp(
+      this.proboscis.scale.y,
+      0.05 + this.pharynxAmt * 0.95,
+      0.12
+    );
+
+    // Tripod-gait leg walk: two alternating groups of 3 legs. This connectome
+    // has no per-leg motor neurons (it's brain-only, not the VNC/MANC that
+    // actually wires individual legs in a real fly), so the gait itself is
+    // synthesized — but every input driving it is a real brain signal: step
+    // frequency/lift track descending_center + firing-rate heat, and the
+    // left/right amplitude split tracks the real descending_left/right
+    // steering differential (outer legs take bigger steps to turn, like real
+    // hexapod locomotion), plus a firing-rate-linked jitter so the gait
+    // visibly reacts to brain spikes instead of looping identically.
     const idleTwitch = this.lastSpeed < 0.05;
-    const stepFreq = 3.2 + this.lastSpeed * 2.5;
+    const stepFreq = 3.2 + this.lastSpeed * 2.5 + this.brainHeat * 1.4;
     this.legPhase += frameDt * stepFreq * (idleTwitch ? 0.2 : 1);
-    const swingAmp = idleTwitch ? 0.06 : THREE.MathUtils.clamp(0.18 + this.lastSpeed * 0.32, 0.18, 0.7);
-    this.legs.forEach((pivot, i) => {
+    const baseAmp = idleTwitch ? 0.06 : THREE.MathUtils.clamp(0.2 + this.lastSpeed * 0.34, 0.2, 0.75);
+    const jitter = (Math.random() - 0.5) * this.brainHeat * 0.12;
+    this.legs.forEach((leg, i) => {
+      const sideFactor = i < 3 ? 1 + this.turnSkew * 0.5 : 1 - this.turnSkew * 0.5;
       const groupPhase = this.tripodA.has(i) ? 0 : Math.PI;
       const s = Math.sin(this.legPhase + groupPhase);
-      pivot.rotation.x = s * swingAmp;
-      pivot.position.y = this.legBaseY + Math.max(0, s) * (idleTwitch ? 0.01 : 0.07);
+      const amp = Math.max(0.05, baseAmp * sideFactor + jitter);
+      const lift = Math.max(0, s);
+      leg.hip.rotation.x = s * amp;
+      leg.hip.position.y = this.legBaseY + lift * (idleTwitch ? 0.01 : 0.07);
+      leg.knee.rotation.x = -lift * amp * 1.4 - 0.1;
     });
 
     // Sugar pulse & eat
@@ -431,6 +512,15 @@ export class LabView implements OnInit, AfterViewInit, OnDestroy {
     if (toSugar.length() < SUGAR_EAT) {
       this.eatenCount.update((n) => n + 1);
       this.relocateSugar();
+    }
+
+    // Follow the bug: shift camera + orbit target by however far it moved
+    // this frame, preserving whatever zoom/angle the user has dialed in.
+    const followDelta = new THREE.Vector3().subVectors(this.bug.position, this.camFollowPos);
+    if (this.controls && (followDelta.x !== 0 || followDelta.z !== 0)) {
+      this.camera.position.add(followDelta);
+      this.controls.target.add(followDelta);
+      this.camFollowPos.copy(this.bug.position);
     }
 
     this.controls?.update();

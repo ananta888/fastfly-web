@@ -100,27 +100,73 @@ verursacht, NICHT durch die alte Korruption):
   hätte nie Punkte gezeigt, auch nicht vor dieser Session. Fix: liest jetzt
   `j.classes?.ids_b64`.
 
-## Käfer-Optik: Beine animiert + Flügel ergänzt (User-Feedback)
-User-Rückmeldung: der Käfer sah im Vergleich zu anderen Beispielen zu wenig nach
-Fliege aus und die Beine reagierten nicht wie bei einer echten Fliege. Befund im
-Code: die 6 Beine waren starre, unbewegte Zylinder, die nur starr mit der gesamten
-Gruppe mitgeschleift wurden — keinerlei Gang-Animation.
-Fix in `lab-view.ts`:
-- Beine sind jetzt `THREE.Group`-Pivots pro Hüfte (3 Paare: vorne/mitte/hinten ×
-  links/rechts), sodass sich jedes Bein um sein Hüftgelenk drehen lässt.
-- Im `loop()` läuft ein **Tripod-Gait** (klassisches Insekten-Gangmuster: 3 Beine
-  schwingen synchron, die anderen 3 gegenphasig um π) — Schwingfrequenz und
-  -amplitude skalieren mit `lastSpeed` (steht der Käfer, nur ein leichtes Zucken;
-  läuft er, volle Schrittbewegung inkl. leichtem Anheben in der Schwungphase).
-- Zwei halbtransparente Flügel (PlaneGeometry, seitlich geneigt) am Thorax ergänzt.
-- Playwright-Screenshots (Serie mit 150–250ms Abstand) zeigen sichtbar wechselnde
-  Beinstellungen zwischen Frames — die Animation läuft. **Ehrlicher Stand**: aus der
-  Standard-Vogelperspektive (OrbitControls von oben) liest sich der Körper weiterhin
-  eher als leuchtender Blob als als klar erkennbare Fliege; Flügel sind aus dieser
-  Perspektive kaum sichtbar. Für einen wirklich fliegenähnlichen Eindruck bräuchte es
-  noch: schlankeren/länglicheren Körper mit klar getrennten Segmenten (Kopf/Thorax/
-  Abdomen), einen tieferen Default-Kamerawinkel, und ggf. Halteren. War in dieser
-  Session nicht mehr Scope — bei Bedarf nächster Schritt.
+## Käfer-Optik, Runde 2: echter Fliegenkörper + von echten Motorneuronen bewegt
+User-Rückmeldung (zwei Nachrichten): (1) der Käfer sah im Vergleich zu anderen
+Beispielen zu wenig nach Fliege aus, die Beine reagierten nicht wie bei einer
+echten Fliege; (2) in den Vergleichsbeispielen hatte das Gehirn einen sinnvollen
+Fliegenkörper bekommen und diesen sichtbar so bewegt, wie es für eine Fliege
+typisch ist — also nicht nur Optik, sondern die Bewegung sollte wirklich vom
+simulierten Gehirn kommen.
+
+**Runde 1** (Tripod-Gait + Flügel) war schon committet, blieb aber aus der
+Standard-Vogelperspektive ein erkennbarer, aber wenig überzeugender Blob.
+
+**Runde 2 — was tatsächlich neu ist:**
+
+1. **Motor-Signale recherchiert statt geraten.** Live per WebSocket geprüft,
+   welche `motor_rates`-Gruppen das Backend überhaupt sendet (siehe
+   `sim_engine.py`, `_body_motor` kommt direkt aus den echten Connectome-
+   Annotationen). Ergebnis: 8 echte Gruppen, nicht nur die 4 bisher genutzten:
+   `descending_center, descending_left, descending_right, motor_antenna,
+   motor_eye, motor_neck, motor_pharynx, motor_proboscis`.
+   **Wichtiger Befund**: echte Bein-Motorneuronen gibt es in diesem Datensatz
+   NICHT — FlyWire/hemibrain deckt nur das Gehirn ab, nicht das Bauchmark
+   (VNC/MANC), das bei einer echten Fliege die einzelnen Beine ansteuert. Eine
+   1:1-"jedes Bein hat sein eigenes Hirn-Signal"-Umsetzung ist mit diesen Daten
+   schlicht nicht ehrlich möglich — das wurde dem User so erklärt statt es zu
+   verschweigen oder vorzutäuschen.
+2. **Antrieb korrigiert**: `drive` (Laufgeschwindigkeit) kam vorher aus
+   `motor_proboscis`/`motor_antenna` (Fress-/Riech-Schaltkreise, keine
+   Locomotion!) plus einer festen Konstante `0.9`. Jetzt: `descending_center`
+   (das tatsächliche generelle Lauf-Antriebssignal, empirisch abgetastet:
+   Baseline ~0.23–0.27, schwankt leicht von selbst) ist der Haupttreiber
+   (`dc * 3.6`), proboscis/antenna liefern nur noch den zusätzlichen "sieht
+   Zucker, wird hektisch"-Kick obendrauf.
+3. **Neue echte Kopplungen** in `onMetrics()`/`loop()`:
+   - `descending_left/right`-Differenz (`turnSkew`) verzerrt jetzt zusätzlich
+     zur Kursänderung auch die Bein-Schwungamplitude zwischen linker/rechter
+     Seite (Außenbeine treten beim Abbiegen weiter aus — echtes
+     Hexapod-Lenkprinzip).
+   - `motor_neck` dreht den Kopf unabhängig vom Körper leicht hin und her
+     ("Umschauen").
+   - `motor_pharynx` fährt einen neuen Rüssel (`this.proboscis`,
+     Cylinder-Mesh) sichtbar aus, wenn der Fress-Reflex feuert.
+   - `firing_rate` (`brainHeat`) beeinflusst jetzt zusätzlich Schrittfrequenz
+     und einen kleinen Zufalls-Jitter der Beinamplitude, damit der Gang
+     sichtbar auf Spikes reagiert statt stur zu loopen.
+4. **Körper neu gebaut**: Thorax (klein, `gloss`-Material, vorne) + Abdomen
+   (länglich, tapered, `glow`-Material mit dem Firing-Heat) statt einer
+   einzelnen abgeflachten Kugel. Rote Facettenaugen statt weißer Punkte.
+5. **Beine jetzt zweigliedrig** (Hüfte/Coxa-Femur-Pivot + Knie/Tibia-Pivot
+   als Kind-Pivot), Tripod-Gait biegt jetzt sichtbar das Knie während der
+   Schwungphase mit ein, nicht nur ein starrer Hüftschwung wie in Runde 1.
+6. **Kamera folgt jetzt dem Käfer**: vorher fest auf den Arena-Ursprung
+   gerichtet (Distanz ~21, der Käfer war oft klein/weit weg); jetzt läuft in
+   `loop()` ein Delta-Follow (`camera.position` und `controls.target` werden
+   um genau die Strecke verschoben, die der Käfer diesen Frame gelaufen ist),
+   sodass die Nutzer-Zoom/Dreh-Einstellung erhalten bleibt, aber der Käfer
+   nie aus dem Bild läuft. Start-Distanz spürbar näher (vorher (11,13,14),
+   jetzt (4.2,3.4,5.2) relativ zum Käfer).
+
+**Verifiziert** per Playwright/Chromium gegen die Live-URL: Käfer bleibt im
+Bild, Beine/Knie sichtbar unterschiedlich pro Frame, Augen/Kopf/Abdomen klar
+als getrennte Formen erkennbar (siehe Screenshots, an den User geschickt),
+Zucker wurde während des Tests wieder gegessen, keine Konsolenfehler.
+
+**Ehrlicher Rest-Stand**: Flügel sind aus den meisten Blickwinkeln weiterhin
+kaum sichtbar (dünne PlaneGeometry, im typischen Betrachtungswinkel fast von
+der Kante gesehen) — wurden nicht weiter verfolgt, da die Beine/Körperform
+den größeren Unterschied gemacht haben. Halteren fehlen weiterhin.
 
 ## WICHTIG — Betriebshinweis: `ng build` deployed hier DIREKT live!
 Der laufende Docker-Container `caddy-fastfly` bindet `fastfly-web/dist/fastfly-web/browser`
